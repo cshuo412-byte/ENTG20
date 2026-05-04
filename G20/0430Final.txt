@@ -1,0 +1,416 @@
+import os, sys, io
+import M5
+from M5 import *
+import time
+import random
+
+# Global UI control object definition
+label0 = None
+label1 = None
+label2 = None
+label3 = None
+label4 = None
+
+# Gyroscope raw three-axis data buffer
+gx = 0
+gy = 0
+gz = 0
+
+# Global meteorological parameter variables
+# Store environmental temperature and humidity parsed from local file
+Temperature = 0.0
+Humidness = 0.0
+
+def weather_file_parse():
+    """
+    Parse local weather data file to obtain environmental temperature and humidity
+    Read weather.txt in flash storage, extract two lines of numeric data for analysis
+    Complete data verification, format conversion and exception handling
+    :return: Dictionary containing temperature, humidity and working state
+    """
+    global Temperature, Humidness
+    # Define storage path of local weather data file
+    target_file_path = "/flash/weather.txt"
+    buff_list = []
+    raw_content = ""
+    line_cache_1 = ""
+    line_cache_2 = ""
+    
+    # Open and read local file data, capture file access exceptions
+    try:
+        with open(target_file_path, "r", encoding="utf-8") as f:
+            raw_content = f.read()
+            # Split full text content by line breaks for independent analysis
+            buff_list = raw_content.splitlines()
+    except Exception as file_err:
+        # Reset buffer data when file access fails
+        raw_content = ""
+        buff_list = []
+
+    # Verify valid line quantity and filter valid data content
+    if len(buff_list) >= 2:
+        # Remove redundant blank characters to purify raw data
+        line_cache_1 = str(buff_list[0]).strip()
+        line_cache_2 = str(buff_list[1]).strip()
+        # Verify numeric format and convert data type to floating point
+        if line_cache_1.isdigit() or line_cache_1.replace(".","").isdigit():
+            Temperature = float(line_cache_1)
+        if line_cache_2.isdigit() or line_cache_2.replace(".","").isdigit():
+            Humidness = float(line_cache_2)
+
+    # Release invalid cache resources to optimize memory occupancy
+    raw_content = None
+    buff_list.clear()
+    # Return parsed data and current module operating status
+    return {"temp":Temperature,"humi":Humidness,"state":"standby"}
+
+# Physical health monitoring data statistics
+# Record cumulative times of drinking water reminder
+count_water = 0
+# Record cumulative times of rest reminder
+count_break = 0
+
+# System core operating parameters
+# Physical condition value, dynamically adjusted according to user state
+love = 100
+# System loop detection period control parameter
+check_interval = 0.00001
+# Timestamp record of last state detection
+last_check_time = 0
+# Motion shake duration statistical counter
+shake_time = 0
+# Static state duration statistical counter
+static_time = 0
+# System startup timestamp recording
+boot_start_time = 0
+
+# System running state control variables
+# Random index for startup interface switching
+boot_rand = 0
+# Random index for expression resource switching
+run_rand = 0
+# Sleep mode state flag bit
+is_sleep = False
+# Random index for sleep expression switching
+sleep_rand = 0
+# Timestamp record of entering sleep state
+sleep_start_time = 0
+# Reminder task start timestamp
+remind_start_time = 0
+# Mark current ongoing reminder type
+current_remind_type = None
+# Reminder task cycle switching control bit
+remind_mode = 0
+
+# Idle mode timing and locking control parameters
+idle_once_done = False
+idle_stage_t = 0
+
+# Motion detection threshold calibration parameters
+# X-axis static judgment range
+STATIC_X_MIN = -50
+STATIC_X_MAX = 50
+# Y-axis static judgment range
+STATIC_Y_MIN = -100
+STATIC_Y_MAX = 100
+# Default environmental temperature calibration value
+STATIC_Z_TE = 12
+# Default environmental humidity calibration value
+STATIC_Z_HU = 95
+# Maximum duration of single reminder task
+REMIND_DURATION = 30
+
+# Facial expression resource library for motion state feedback
+face_left = ["( O_ O ; )", "( * A  * ; )"]
+face_right = ["( ; O _O )", "( ; *  A * )"]
+face_left_fast = ["( > O < ;))", "( > ~ < ;))"]
+face_right_fast = ["(( ; > O <)", "(( ; > ~ <)"]
+
+face_up = ["(' * ^ * ')", "(' q u q ')"]
+face_down = ["(  . __ .  )", "( u __ u )"]
+face_up_fast = ["( '> - <' )", "( .> v <. )"]
+face_down_fast = ["( -> u <- )", "( '> ~ <' )"]
+
+# Dizzy and fatigue state expression
+face_dizzy = ["(;O __ O;)", "( @ _ @ );"]
+# System startup welcome expression
+face_hello = ["L( ^ w ^ )/", "L( * v * )/"]
+# Startup interface text display content
+hello_words = ["        Hello        ", "       Good Day       "]
+
+# Long-term static idle state expression
+face_idle_1 = "( o __ o )"
+face_idle_2 = "(  - __ -  )"
+# Sleep mode exclusive expression
+face_sleep = ["(~ o ~)zzz", "(- w -)zzz"]
+
+# Drinking water reminder matching resources
+face_water = ["(*^ A ^*)D[]", "(=* v *=)D[]"]
+text_water = ["Drink water", "Water time"]
+# Rest relaxation reminder matching resources
+face_rest = ["\(^ V ^)/", "(=^ o ^=)"]
+text_rest = ["Take a break", "Rest now"]
+# Low physical condition feedback expression
+face_lost = ["(q __ q ) ;", "(Q o Q)||"]
+
+# Buzzer one-time trigger locking flag
+beep_once = False
+
+def send_health_report():
+    """
+    Generate and output user daily health monitoring report
+    Count reminder records, evaluate health status and give targeted suggestions
+    Output complete report data through serial port for data viewing and storage
+    """
+    global count_water, count_break, love
+
+    # Load health evaluation suggestion list
+    tip_list = []
+    if count_water < 7:
+        tip_list.append("Need to drink more water")
+    if count_break < 7:
+        tip_list.append("Need more rest")
+    if count_water >= 7 and count_break >= 7:
+        tip_list.append("Goal completed, keep it up")
+
+    # Output standardized formatted health report information
+    print("===== Health Report =====")
+    print("Total Water Remind: " + str(count_water))
+    print("Total Break Remind: " + str(count_break))
+    print("Current Love Value: " + str(love))
+    for tip in tip_list:
+        print("Suggestion: " + tip)
+    print("=========================\n")
+
+def setup():
+    """
+    System initialization function
+    Complete hardware device startup, screen configuration, UI control creation and parameter initialization
+    Execute once after system power-on to ensure normal operation of each module
+    """
+    global label0, label1, label2, label3, label4
+    global last_check_time, boot_start_time, boot_rand
+    # Initialize M5 hardware bottom layer and driver
+    M5.begin()
+    # Set screen display direction and clear screen with black background
+    Widgets.setRotation(1)
+    Widgets.fillScreen(0x000000)
+
+    # Create and configure on-screen text label controls
+    label0 = Widgets.Label("", 33, 36, 1.0, 0xffffff, 0x222222, Widgets.FONTS.Montserrat44)
+    label1 = Widgets.Label("", 47, 2, 1.0, 0xffffff, 0x222222, Widgets.FONTS.Montserrat18)
+    label2 = Widgets.Label("", 25, 74, 1.0, 0xffffff, 0x222222, Widgets.FONTS.Montserrat18)
+    label3 = Widgets.Label("", 25, 95, 1.0, 0xffffff, 0x222222, Widgets.FONTS.Montserrat18)
+    label4 = Widgets.Label("", 10, 115, 1.0, 0xffffff, 0x222222, Widgets.FONTS.Montserrat18)
+
+    # Initialize random parameters and timing records
+    boot_rand = random.randint(0, 1)
+    last_check_time = time.time()
+    boot_start_time = time.time()
+    # Initialize physical value display content
+    label4.setText("Love: 100")
+
+def set_run_face(face_list):
+    """
+    Switch dynamic display expression on screen
+    Randomly select expression content from specified resource list
+    :param face_list: Target expression resource array to be switched
+    """
+    global run_rand
+    run_rand = random.randint(0, 1)
+    label0.setText(face_list[run_rand])
+
+def wake_up():
+    """
+    System state reset and wake-up processing function
+    Clear timing counters, reset reminder flags and working state
+    Recover device from sleep or idle mode to normal working mode
+    """
+    global static_time, shake_time, is_sleep
+    global current_remind_type, remind_start_time
+    global idle_once_done, idle_stage_t, beep_once
+    # Reset motion and static timing data
+    static_time = 0
+    shake_time = 0
+    # Close sleep mode flag
+    is_sleep = False
+    # Terminate ongoing reminder task
+    current_remind_type = None
+    remind_start_time = 0
+    # Clear idle mode locking parameters
+    idle_once_done = False
+    idle_stage_t = 0
+    # Release buzzer trigger lock
+    beep_once = False
+
+def loop():
+    """
+    Main system infinite loop function
+    Real-time acquisition of gyroscope data, motion state recognition and logic judgment
+    Complete interface display update, reminder task execution and state switching
+    """
+    global gx, gy, gz, last_check_time, shake_time, static_time, love
+    global is_sleep, sleep_rand, sleep_start_time
+    global current_remind_type, remind_start_time, remind_mode
+    global idle_once_done, idle_stage_t, beep_once
+    global count_water, count_break
+
+    # Refresh M5 device bottom layer state
+    M5.update()
+    now = time.time()
+
+    # Trigger health report export when key A is pressed
+    if BtnA.wasPressed():
+        send_health_report()
+
+    # Control 10-second startup welcome interface display duration
+    boot_run = now - boot_start_time
+    if boot_run <= 10:
+        label1.setText(hello_words[boot_rand])
+        label0.setText(face_hello[boot_rand])
+        label2.setText("")
+        label3.setText("Temp:" + str(STATIC_Z_TE) + "'C Hum:" + str(STATIC_Z_HU) + "%")
+        label4.setText("Love: " + str(love))
+    else:
+        # Close welcome interface and clear redundant display content
+        label1.setText("")
+        if current_remind_type is None:
+            label2.setText("")
+        label3.setText("")
+
+    # Periodic motion state detection and data analysis
+    if now - last_check_time >= check_interval:
+        last_check_time = now
+        # Read real-time three-axis gyroscope data
+        (gx, gy, gz) = Imu.getGyro()
+        # Determine whether the current state is long-term static
+        in_static_range = (STATIC_X_MIN <= gx <= STATIC_X_MAX and
+                           STATIC_Y_MIN <= gy <= STATIC_Y_MAX)
+
+        # Logical processing during ongoing reminder task
+        if current_remind_type is not None:
+            remind_elapsed = now - remind_start_time
+            # Single buzzer sound prompt when reminder starts
+            if not beep_once:
+                Speaker.tone(8000, 80)
+                beep_once = True
+
+            # Exit reminder and restore state when motion is detected
+            if not in_static_range:
+                love += 5
+                if love > 100:
+                    love = 100
+                remind_mode = 1 - remind_mode
+                wake_up()
+                label2.setText("")
+
+            # Automatically end reminder after fixed duration
+            elif remind_elapsed >= REMIND_DURATION:
+                love -= 1
+                if love < 0:
+                    love = 0
+                set_run_face(face_lost)
+                label2.setText("")
+                remind_mode = 1 - remind_mode
+                current_remind_type = None
+                beep_once = False
+            else:
+                # Switch corresponding expression and text according to reminder type
+                if current_remind_type == "break":
+                    set_run_face(face_rest)
+                    label2.setText(text_rest[run_rand])
+                if current_remind_type == "water":
+                    set_run_face(face_water)
+                    label2.setText(text_water[run_rand])
+
+        # Normal working state logic without reminder task
+        else:
+            if in_static_range:
+                # Accumulate timing in static state and enter idle mode step by step
+                static_time += 1
+                shake_time = 0
+                if static_time >= 10 and not idle_once_done:
+                    idle_stage_t += 1
+                    # Switch idle expression according to static duration
+                    if idle_stage_t <= 10:
+                        label0.setText(face_idle_1)
+                    elif idle_stage_t <= 11:
+                        label0.setText(face_idle_2)
+                    elif idle_stage_t <= 21:
+                        label0.setText(face_idle_1)
+                    else:
+                        idle_once_done = True
+                        is_sleep = True
+                        sleep_rand = random.randint(0, 1)
+                        sleep_start_time = now
+                # Maintain sleep mode display in long-term static state
+                if idle_once_done and is_sleep:
+                    label0.setText(face_sleep[sleep_rand])
+                    sleep_dur = now - sleep_start_time
+                    # Automatically trigger reminder task after long sleep
+                    if sleep_dur >= 30:
+                        if remind_mode == 0:
+                            current_remind_type = "break"
+                            count_break += 1
+                        else:
+                            current_remind_type = "water"
+                            count_water += 1
+                        remind_start_time = now
+            else:
+                # Reset static timing when motion is detected
+                if is_sleep or idle_once_done:
+                    wake_up()
+                else:
+                    static_time = 0
+                # Recognize motion amplitude and switch dynamic expression
+                if gx < -150:
+                    set_run_face(face_left_fast)
+                    shake_time += 1
+                elif gx < -50:
+                    set_run_face(face_left)
+                    shake_time += 1
+                elif gx > 150:
+                    set_run_face(face_right_fast)
+                    shake_time += 1
+                elif gx > 50:
+                    set_run_face(face_right)
+                    shake_time += 1
+                elif gy > 200:
+                    set_run_face(face_up_fast)
+                    shake_time += 1
+                elif gy > 100:
+                    set_run_face(face_up)
+                    shake_time += 1
+                elif gy < -200:
+                    set_run_face(face_down_fast)
+                    shake_time += 1
+                elif gy < -100:
+                    set_run_face(face_down)
+                    shake_time += 1
+            # Trigger fatigue expression in continuous shaking state
+            if shake_time >= 5:
+                set_run_face(face_dizzy)
+                love -= 1
+                if love < 0:
+                    love = 0
+                shake_time = 0
+        # Real-time update of physical condition value display
+        label4.setText("Love: " + str(love))
+    # Short cycle delay to stabilize system operation
+    time.sleep_ms(5)
+
+# System main program entry
+if __name__ == '__main__':
+    try:
+        # Execute hardware initialization
+        setup()
+        # Continuously run main logic loop
+        while True:
+            loop()
+    except (Exception, KeyboardInterrupt) as e:
+        # Capture global exceptions and output error prompts
+        try:
+            from utility import print_error_msg
+            print_error_msg(e)
+        except ImportError:
+            print("please update to latest firmware")
